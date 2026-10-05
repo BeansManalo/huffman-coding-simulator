@@ -52,6 +52,8 @@ final class StageLayer extends LayerUI<JPanel> {
     private static final double CLONE = 0.34;
     /** How high a clone rises, in pixels. */
     private static final double LIFT = 26;
+    /** The longest a digit is shown waiting at the clone after it breaks; one that must wait longer is not shown until this long before it leaves. */
+    private static final double GATHER = 0.14;
     /** Seconds a digit takes to fly from the clone to the edge of the energy swirling round the core, where it becomes a mote. */
     private static final double HOP = 0.62;
     /** How many motes fall at the energy's own pace; more than this and they fall faster, to at most BOOST times as fast. */
@@ -167,19 +169,22 @@ final class StageLayer extends LayerUI<JPanel> {
      * A clone of the table's row {@code row} (its box, with the code, drawn in {@code font},
      * starting at {@code codeX}) rises and breaks into the 8 bits of its {@code symbol}, which is
      * what the code stands for, and into every digit of {@code code}: each one bit of the
-     * compressed size, flying to the cannon together. The clones come {@code gap} seconds apart,
-     * and a quick succession of them is quick to form too, so that they do not pile up.
+     * compressed size, flying to the cannon. The clones come {@code gap} seconds apart, and a quick
+     * succession of them is quick to form too, so that they do not pile up. A clone's digits leave
+     * one by one over the {@code gap} (at most 2 s, at least {@link #GATHER}), so that when there are few
+     * clones the core takes the digits in steadily instead of all at once.
      */
     void cloneRow(int symbol, String code, Font font, Rectangle row, int codeX, double gap) {
         int m = 8 + code.length();
         double digitW = font.getStringBounds("0", FRC).getWidth();
         Bit[] list = new Bit[m];
+        double spread = Math.max(GATHER, Math.min(2, gap));
         for (int k = 0; k < m; k++) {
             boolean mark = k < 8;   // the symbol's bits come first, high bit first, from the middle of its cell
             boolean one = mark ? (symbol >> (7 - k) & 1) == 1 : code.charAt(k - 8) == '1';
             double r1 = (k * 0.618034 + symbol * 0.37) % 1;
             double r2 = (k * 0.414214 + symbol * 0.71) % 1;
-            list[k] = new Bit(mark ? Theme.TEXT_PRIMARY : one ? Theme.ACCENT_HOVER : Theme.VIOLET, one, 0.14 * r1,
+            list[k] = new Bit(mark ? Theme.TEXT_PRIMARY : one ? Theme.ACCENT_HOVER : Theme.VIOLET, one, spread * r1,
                 mark ? (row.x - codeX - 8) / 2.0 + (k - 3.5) * digitW : (k - 8 + 0.5) * digitW,
                 (k - (m - 1) / 2.0) * Math.min(12, 96.0 / m), 24 + 26 * r2);   // a long code fans out no wider than 8 digits did
         }
@@ -302,6 +307,9 @@ final class StageLayer extends LayerUI<JPanel> {
      * white at the core, with a streak behind it, falling in along {@link CubeField#mote}.
      */
     private void drawBit(Graphics2D g, Bit b, Point core) {
+        if (b.age < -GATHER) {
+            return;
+        }
         double a = Math.max(0, b.age);
         double fade = Math.min(1, b.life * 5);   // the mote's own fade in, which is also how the digit turns into it
         if (fade < 1) {   // the digit and the glow it leaves

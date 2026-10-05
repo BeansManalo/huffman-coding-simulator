@@ -81,7 +81,8 @@ final class CubeField extends JComponent {
     private static final double FEED_PX = 24;     // from the cannon's mouth down to the root, in pixels
     private static final double MUZZLE_H = 40;    // the gun under the cannon's box
     private static final double FEED = 60;        // the same way, in tree units: what the beam's speed is measured in
-    private static final double TRAVEL = 1.4;     // seconds the beam takes to reach the deepest cube, however big the tree
+    private static final double TRAVEL = 1.4;     // sets the beam's speed: at that speed all the way from the cannon it would take this long to get to the deepest cube, however big the tree
+    private static final double FEED_TIME = 0.06; // seconds the beam's head, its tail and an electron take over the cannon's line: nearly light, but not at once
     private static final int ELECTRONS = 360;     // at most this many electrons for a whole run: it stays smooth however big the input
     private static final int DENSE = 24;          // a byte that would need this many electrons is a beam instead
 
@@ -454,9 +455,9 @@ final class CubeField extends JComponent {
         return Math.min(1, beam.t / beam.seconds);
     }
 
-    /** Whether anything is still on its way down the tree: the last of the input needs {@link #TRAVEL} to arrive. */
+    /** Whether anything is still on its way down the tree: the last of the input needs the beam's travel to the deepest cube to arrive. */
     boolean beamBusy() {
-        return beam.t < beam.seconds + TRAVEL + 0.05;
+        return beam.t < beam.seconds + beam.travel + 0.05;
     }
 
     /** How many bytes of the input have reached their cubes, and how many bits of code they stand for. */
@@ -734,9 +735,11 @@ final class CubeField extends JComponent {
      * {@link #ELECTRONS} however big the input is. A byte counts as arrived when its electron
      * lands, or, for a beam, as the beam brings it.
      * <p>
-     * Everything moves at one speed, in tree units a second, chosen so that the deepest cube is
-     * reached in {@link #TRAVEL} seconds. Every line is numbered by the node it leads into; the
-     * root's is the one from the cannon.
+     * Below the root everything moves at one speed, in tree units a second, chosen so that the
+     * deepest cube would be reached from the cannon in {@link #TRAVEL} seconds at that speed. Every
+     * line is numbered by the node it leads into; the root's is the one from the cannon, which is
+     * crossed in {@link #FEED_TIME} instead: the root gets the beam's power as it fires, and the
+     * cannon's line is gone the moment the input runs out, as a beam of light would be.
      */
     private final class Beam {
 
@@ -749,6 +752,7 @@ final class CubeField extends JComponent {
         private final double[] start;      // how far from the cannon that line begins
         private final double speed;
         private final double reach;        // how far from the cannon the deepest cube is: what the beam's color shifts over
+        private final double travel;       // seconds from firing to the beam's head reaching the deepest cube
         private final int[] symbol;        // of each leaf
         private final int[] total;         // how often it occurs
         private final int[] codeBits;
@@ -821,8 +825,9 @@ final class CubeField extends JComponent {
             }
             reach = far;
             speed = far / TRAVEL;
+            travel = FEED_TIME + (far - FEED) / speed;
             for (int l = 0; l < leaves; l++) {
-                tau[l] = (start[l] + len[l]) / speed;
+                tau[l] = FEED_TIME + (start[l] + len[l] - FEED) / speed;
             }
         }
 
@@ -873,9 +878,17 @@ final class CubeField extends JComponent {
             for (Iterator<Electron> it = flying.iterator(); it.hasNext();) {
                 Electron e = it.next();
                 int[] way = path[e.leaf];
-                e.s += speed * dt;
-                while (e.k < way.length && e.s >= len[way[e.k]]) {
-                    e.s -= len[way[e.k++]];
+                double left = dt;   // the time this step has left to spend on it
+                while (e.k < way.length) {
+                    double v = e.k == 0 ? FEED / FEED_TIME : speed;
+                    double toEnd = (len[way[e.k]] - e.s) / v;
+                    if (left < toEnd) {
+                        e.s += v * left;
+                        break;
+                    }
+                    left -= toEnd;
+                    e.s = 0;
+                    e.k++;
                 }
                 if (e.k == way.length) {   // it has reached its cube
                     seen[e.leaf] += e.weight;
@@ -911,10 +924,15 @@ final class CubeField extends JComponent {
             }
         }
 
+        /** How far from the cannon something has got {@code time} seconds after leaving it: over the cannon's line in {@link #FEED_TIME}, then at the beam's speed. */
+        private double along(double time) {
+            return time < FEED_TIME ? FEED * time / FEED_TIME : FEED + speed * (time - FEED_TIME);
+        }
+
         // -- Painting ----------------------------------------------------
         void paint(Graphics2D g) {
-            double reached = speed * t;                // how far the beam's head has got
-            double released = speed * (t - cut);       // ...and, once the input has run out, its tail
+            double reached = along(t);                 // how far the beam's head has got
+            double released = along(t - cut);          // ...and, once the input has run out, its tail
             int root = tree.root();
             for (int n = 0; n < share.length; n++) {
                 boolean feed = n == root;              // the line out of the cannon is always a beam, as big as the input

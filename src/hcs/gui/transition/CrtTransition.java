@@ -50,6 +50,10 @@ public final class CrtTransition extends JComponent {
     private static final int UNLOCK = 1000;
     private static final int STATIC = 280;
     private static final int LOCK = 820;
+    // Milliseconds. A stumble, static over everything, the new picture clearing out of the static.
+    private static final int STUMBLE = 450;
+    private static final int HISS = 700;
+    private static final int CLEAR = 550;
     /** How thick the line is, in pixels. */
     private static final int LINE = 3;
     private static final Color GLOW = new Color(0x9D, 0xB8, 0xFA);
@@ -63,6 +67,7 @@ public final class CrtTransition extends JComponent {
     private final TexturePaint scanlines;
     private final long start = System.nanoTime();
     private final boolean glitch;
+    private final boolean hiss;   // the glitch that is mostly static: see staticLoss
     private final int offEnd;   // when the old screen is gone, and the new one may be put in place
     private final int total;
     private final Random rnd = new Random();
@@ -77,21 +82,30 @@ public final class CrtTransition extends JComponent {
      * picture is dark; {@code done}, if there is one, runs when the next screen is showing for real.
      */
     public static void play(JFrame frame, Runnable swap, Runnable done) {
-        new CrtTransition(frame, swap, done, false);
+        new CrtTransition(frame, swap, done, false, false);
     }
 
     /** Like {@link #play}, but the TV loses its signal instead of switching off. */
     public static void glitch(JFrame frame, Runnable swap, Runnable done) {
-        new CrtTransition(frame, swap, done, true);
+        new CrtTransition(frame, swap, done, true, false);
     }
 
-    private CrtTransition(JFrame frame, Runnable swap, Runnable done, boolean glitch) {
+    /**
+     * Like {@link #glitch}, but short and mostly static: the picture stumbles a little, static
+     * takes the whole screen, and the next picture clears out of it.
+     */
+    public static void snow(JFrame frame, Runnable swap, Runnable done) {
+        new CrtTransition(frame, swap, done, true, true);
+    }
+
+    private CrtTransition(JFrame frame, Runnable swap, Runnable done, boolean glitch, boolean hiss) {
         this.frame = frame;
         this.swap = swap;
         this.done = done;
         this.glitch = glitch;
-        offEnd = glitch ? UNLOCK : OFF_END;
-        total = glitch ? UNLOCK + STATIC + LOCK : TOTAL;
+        this.hiss = hiss;
+        offEnd = hiss ? STUMBLE : glitch ? UNLOCK : OFF_END;
+        total = hiss ? STUMBLE + HISS + CLEAR : glitch ? UNLOCK + STATIC + LOCK : TOTAL;
         before = snapshot(frame.getContentPane());
         warped = glitch ? new BufferedImage(before.getWidth(), before.getHeight(), BufferedImage.TYPE_INT_RGB) : null;
         tear = new int[before.getHeight()];
@@ -156,7 +170,11 @@ public final class CrtTransition extends JComponent {
         double cx = w / 2.0;
         double cy = h / 2.0;
         if (glitch) {
-            signalLoss(g2, w, h);
+            if (hiss) {
+                staticLoss(g2, w, h);
+            } else {
+                signalLoss(g2, w, h);
+            }
             g2.dispose();
             return;
         }
@@ -253,6 +271,32 @@ public final class CrtTransition extends JComponent {
                 g2.setClip(null);
                 glow(g2, w / 2.0, y, w / 2.0, Math.min(1, (1 - sweep) * 4));
             }
+        }
+    }
+
+    /**
+     * Three stages: a slight glitch with static creeping in, static over everything (the picture
+     * shows through now and then, torn, and a dark band rolls up the screen), the new picture clearing out of it.
+     */
+    private void staticLoss(Graphics2D g2, int w, int h) {
+        int stop = offEnd + HISS;
+        if (t < offEnd) {
+            double p = t / offEnd;
+            scene(g2, before, 0.15 + 0.3 * p, 0, 0.7 * p * p * p, w, h);
+        } else if (after == null || t < stop) {
+            BufferedImage image = after == null ? before : after;
+            if (rnd.nextInt(9) == 0) {
+                scene(g2, image, 0.6, 0, 0.25, w, h);   // a flash of the picture
+            } else {
+                scene(g2, image, 1, 0, 0.7 + 0.15 * rnd.nextDouble(), w, h);
+            }
+            int y = (int) ((t - offEnd) * 0.9 % (h + 240)) - 120;   // the dark band
+            g2.setPaint(new LinearGradientPaint(0, y - 120, 0, y + 120, new float[] {0f, 0.5f, 1f},
+                new Color[] {alpha(Color.BLACK, 0), alpha(Color.BLACK, 120), alpha(Color.BLACK, 0)}));
+            g2.fillRect(0, y - 120, w, 240);
+        } else {
+            double p = Math.min(1, (t - stop) / CLEAR);
+            scene(g2, after, 0.45 * (1 - p), 0, 0.7 * (1 - p) * (1 - p), w, h);
         }
     }
 

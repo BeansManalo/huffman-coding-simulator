@@ -37,9 +37,23 @@ public class MainFrame extends JFrame {
     /** Submit: shows the process screen. Animated, the old-TV effect leads into it. */
     private void process(FrequencyScan scan, DisplayMode mode) {
         boolean animated = mode == DisplayMode.ANIMATED;
+        Runnable back = () -> show(input, animated, null);
         // Made now, so the input is already being read while the TV switches off.
-        ProcessPanel screen = new ProcessPanel(scan, animated, () -> show(input, animated, null));
+        ProcessPanel screen = new ProcessPanel(scan, animated, back, () -> skip(scan, back));
         show(screen, animated, screen::start);
+    }
+
+    /**
+     * SKIP was confirmed: static covers the show, and under it the process screen is replaced by the
+     * Instant one, made from the input that is already read. It is made now, so it is ready by then.
+     */
+    private void skip(FrequencyScan scan, Runnable back) {
+        ProcessPanel finished = new ProcessPanel(scan, false, back, null);
+        CrtTransition.snow(this, () -> {
+            setContentPane(finished);
+            validate();
+            finished.start();   // Instant: everything is shown at once
+        }, null);
     }
 
     /**

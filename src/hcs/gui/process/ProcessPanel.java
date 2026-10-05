@@ -5,7 +5,7 @@ import hcs.core.FrequencyScan.Checkpoint;
 import hcs.core.HuffmanTree;
 import hcs.gui.MainFrame;
 import hcs.gui.Theme;
-import hcs.gui.dialog.LeaveDialog;
+import hcs.gui.dialog.ConfirmDialog;
 import java.awt.AlphaComposite;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -16,6 +16,7 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.GradientPaint;
+import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -64,6 +65,9 @@ import javax.swing.table.DefaultTableCellRenderer;
  * cannon goes, and the zoom control and the BACK button sweep in. Until then the show cannot be
  * left, and the table cannot be touched; after it, a click on a row of the table sends the
  * camera flying to the cube of its byte.
+ * <p>
+ * Meanwhile SKIP, in BACK's place, offers to end the show at once. The show is paused while the
+ * question is open; on YES the owner swaps this screen for the finished one. SKIP sweeps out as BACK sweeps in.
  */
 @SuppressWarnings("serial")
 public final class ProcessPanel extends JPanel {
@@ -98,6 +102,7 @@ public final class ProcessPanel extends JPanel {
     private static final double CANNON_MS = 800;    // the tree makes room above itself, the cannon sweeps in
     private static final double CLONE_GAP_MS = 90;
     private static final double CLONE_MAX_MS = 8000;
+    private static final double CLONE_MIN_MS = 3000;   // the clones take at least this long to leave the table, so that a few digits are taken in one by one
     private static final double READY_MS = 600;     // charged, before it fires
     private static final double CLOSE_MS = 700;     // the cannon sweeps out, the tree has its room back
     private static final int CANNON_W = 340;
@@ -128,8 +133,11 @@ public final class ProcessPanel extends JPanel {
     private final JComponent tableBox;
     private final JComponent shield = new JComponent() { };   // over the table until the show is over: takes the mouse, so the table does not
     private final Reveal backReveal = new Reveal(true, -60);   // BACK sweeps in with the zoom control
+    private final Reveal skipReveal = new Reveal(true, -60);   // SKIP sweeps out as BACK sweeps in
     private JLayer<JPanel> backBox;
     private JButton btnBack;
+    private JButton btnSkip;               // animated only
+    private JLayer<JPanel> skipBox;
     private final JPanel topSlot;          // animated only: holds the reading package, folds away
     private ReadingView loader;            // animated only: the cannon's reader, which replays the input
     private Reveal cannonReveal;
@@ -158,10 +166,11 @@ public final class ProcessPanel extends JPanel {
     private double cloneGap;               // milliseconds
 
     /**
-     * Create the panel, and start reading the input in the background. Nothing moves until
-     * {@link #start()}, so the panel can be put on the screen first.
+     * Create the panel, and start reading the input in the background (unless {@code scan} already
+     * has). Nothing moves until {@link #start()}, so the panel can be put on the screen first.
+     * {@code onSkip}, which animated panels call once SKIP is confirmed, takes over from there.
      */
-    public ProcessPanel(FrequencyScan scan, boolean animated, Runnable onBack) {
+    public ProcessPanel(FrequencyScan scan, boolean animated, Runnable onBack, Runnable onSkip) {
         this.scan = scan;
         this.animated = animated;
         setPreferredSize(MainFrame.WINDOW_SIZE);
@@ -227,7 +236,7 @@ public final class ProcessPanel extends JPanel {
 
         btnBack = Theme.button("BACK");
         btnBack.addActionListener(e -> {
-            if (LeaveDialog.ask(this)) {
+            if (ConfirmDialog.leave(this)) {
                 stop();
                 onBack.run();
             }
@@ -238,18 +247,26 @@ public final class ProcessPanel extends JPanel {
         JPanel zoomSlot = new JPanel(new GridBagLayout());   // keeps the slider its own size, in the middle of the row's height
         zoomSlot.setOpaque(false);
         zoomSlot.add(zoomBox);
-        JPanel backSlot = new JPanel(new FlowLayout(FlowLayout.CENTER, 24, 0));
-        backSlot.setOpaque(false);
-        backSlot.add(btnBack);
         actions.add(zoomSlot, BorderLayout.WEST);
-        backBox = new JLayer<>(backSlot, backReveal);
-        actions.add(backBox, BorderLayout.CENTER);
+        backBox = new JLayer<>(slot(btnBack), backReveal);
+        JPanel center = new JPanel(new GridBagLayout());   // BACK and SKIP share one place: SKIP while the show plays, BACK after
+        center.setOpaque(false);
+        GridBagConstraints same = new GridBagConstraints();
+        same.gridx = 0;
+        same.gridy = 0;
+        center.add(backBox, same);   // on top, so that SKIP has the mouse while BACK is hidden
+        actions.add(center, BorderLayout.CENTER);
         actions.add(Box.createHorizontalStrut(zoomBox.getPreferredSize().width), BorderLayout.EAST);   // BACK stays in the middle
         add(actions, BorderLayout.SOUTH);
 
         if (animated) {
             backReveal.progress = 0;   // the show cannot be left: BACK arrives when it is over
             showBack(false);
+            btnSkip = Theme.ghost("SKIP");
+            showSkip(false);   // until the input is read there is nothing to skip to
+            btnSkip.addActionListener(e -> skip(onSkip));
+            skipBox = new JLayer<>(slot(btnSkip), skipReveal);
+            center.add(skipBox, same);   // under BACK
             reveal.progress = 0;   // the table package is made after the reading
             JPanel box = Theme.box("READING", reading);
             boxHeight = box.getPreferredSize().height;
@@ -286,7 +303,9 @@ public final class ProcessPanel extends JPanel {
         new SwingWorker<Void, Void>() {
             @Override
             protected Void doInBackground() throws Exception {
-                scan.run();
+                if (scan.checkpoints() == null) {   // the finished screen of a skip gets a scan that is read already
+                    scan.run();
+                }
                 return null;
             }
 
@@ -521,6 +540,9 @@ public final class ProcessPanel extends JPanel {
         statValue[2] = 100.0 * (1 - statValue[1] / statValue[0]);   // the share of the input that is saved
         readMs = Math.max(MIN_READ_MS, Math.min(MAX_READ_MS, scan.total() * MS_PER_BYTE));
         ready = true;
+        if (btnSkip != null) {
+            showSkip(true);
+        }
     }
 
     private void fail(String message) {
@@ -531,6 +553,10 @@ public final class ProcessPanel extends JPanel {
         backReveal.progress = 1;   // nothing is showing, so there is no show to protect
         showBack(true);
         backBox.repaint();
+        if (btnSkip != null) {
+            skipReveal.progress = 0;
+            showSkip(false);
+        }
         cubes.setMessage(message, true);
         cubes.repaint();
         if (topSlot != null) {
@@ -747,7 +773,7 @@ public final class ProcessPanel extends JPanel {
                 cubes.fire(seconds);
                 cubes.setCharge(Math.max(0, 1 - ms / 400));
                 deliver(false);
-                if (!cubes.beamBusy()) {
+                if (!cubes.beamBusy() && ms >= 400) {   // the charge has drained, whatever the tree
                     cubes.endBeam();
                     deliver(true);   // exactly what was counted, not the beam's running sum
                     cubes.setCaption(treeCaption());
@@ -762,14 +788,17 @@ public final class ProcessPanel extends JPanel {
                 if (ms >= CLOSE_MS) {
                     cannon.setVisible(false);
                     showBack(true);
+                    showSkip(false);   // the show is over: SKIP is on its way out and cannot be pressed
                     next(Phase.ZOOM);
                 }
             }
             case ZOOM -> {
                 zoomReveal.progress = easeOut(ms / STAT_MS);
                 backReveal.progress = zoomReveal.progress;
+                skipReveal.progress = 1 - zoomReveal.progress;
                 zoomBox.repaint();
                 backBox.repaint();
+                skipBox.repaint();
                 if (ms >= STAT_MS) {
                     next(Phase.DONE);
                 }
@@ -841,6 +870,38 @@ public final class ProcessPanel extends JPanel {
     private void showBack(boolean on) {
         btnBack.setEnabled(on);
         btnBack.setCursor(Cursor.getPredefinedCursor(on ? Cursor.HAND_CURSOR : Cursor.DEFAULT_CURSOR));
+        backBox.setVisible(on);   // it sits over SKIP, so while it is off it must not take the mouse
+    }
+
+    /** SKIP can be pressed from the moment the input is read until the show is over, or while it is being confirmed. */
+    private void showSkip(boolean on) {
+        btnSkip.setEnabled(on);
+        btnSkip.setCursor(Cursor.getPredefinedCursor(on ? Cursor.HAND_CURSOR : Cursor.DEFAULT_CURSOR));
+    }
+
+    /** A button in the middle of the row's slot; BACK and SKIP both stand in one. */
+    private static JPanel slot(JButton button) {
+        JPanel slot = new JPanel(new FlowLayout(FlowLayout.CENTER, 24, 0));
+        slot.setOpaque(false);
+        slot.add(button);
+        return slot;
+    }
+
+    /**
+     * SKIP: the show stops where it is while the question is open. On YES it stays stopped, SKIP
+     * can no longer be pressed, and {@code onSkip} takes over; on NO the show carries on from the same point.
+     */
+    private void skip(Runnable onSkip) {
+        timer.stop();
+        long stoppedAt = System.nanoTime();
+        if (ConfirmDialog.skip(this)) {
+            showSkip(false);
+            onSkip.run();
+        } else {
+            phaseStart += System.nanoTime() - stoppedAt;   // the time spent deciding is not part of the show
+            last = System.nanoTime();
+            timer.start();
+        }
     }
 
     /** The whole of row {@code row} of the table, in the stage's coordinates, kept inside the part of the table that can be seen. */
@@ -852,7 +913,7 @@ public final class ProcessPanel extends JPanel {
 
     /** The charge begins, with the table at its first row. */
     private void startCharge() {
-        cloneGap = Math.min(CLONE_GAP_MS, CLONE_MAX_MS / order.length);
+        cloneGap = Math.min(CLONE_MAX_MS / order.length, Math.max(CLONE_GAP_MS, CLONE_MIN_MS / order.length));
         cloned = 0;
         landedBits = 0;
         scrollTo(0);
