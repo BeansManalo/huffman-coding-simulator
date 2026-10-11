@@ -19,6 +19,7 @@ import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Shape;
 import java.awt.Stroke;
+import java.awt.image.BufferedImage;
 import java.util.Arrays;
 import java.util.List;
 import javax.swing.Icon;
@@ -107,12 +108,31 @@ public final class Theme {
         g2.dispose();
     }
 
+    private static BufferedImage pool;   // the gradient below, a quarter of the size in each direction: it is smooth, so nothing is lost by stretching it
+    private static int poolW, poolH;
+
     /** The background of a whole screen: a pool of navy light in the middle, fading into the chrome. */
     public static void backdrop(Graphics g, JComponent c) {
+        int w = c.getWidth();
+        int h = c.getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        if (pool == null || poolW != w || poolH != h) {
+            poolW = w;
+            poolH = h;
+            int sw = Math.max(1, w / 4);
+            int sh = Math.max(1, h / 4);
+            pool = new BufferedImage(sw, sh, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g2 = pool.createGraphics();
+            g2.setPaint(new RadialGradientPaint(sw / 2f, sh * 0.45f, Math.max(sw, sh) * 0.75f,
+                new float[] {0f, 1f}, new Color[] {alpha(NAVY, 0.9), alpha(NAVY, 0)}));
+            g2.fillRect(0, 0, sw, sh);
+            g2.dispose();
+        }
         Graphics2D g2 = (Graphics2D) g.create();
-        g2.setPaint(new RadialGradientPaint(c.getWidth() / 2f, c.getHeight() * 0.45f, Math.max(c.getWidth(), c.getHeight()) * 0.75f,
-            new float[] {0f, 1f}, new Color[] {alpha(NAVY, 0.9), alpha(NAVY, 0)}));
-        g2.fillRect(0, 0, c.getWidth(), c.getHeight());
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2.drawImage(pool, 0, 0, w, h, null);
         g2.dispose();
     }
 

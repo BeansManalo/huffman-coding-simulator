@@ -21,17 +21,21 @@ import java.awt.RadialGradientPaint;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Stroke;
+import java.awt.Transparency;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Line2D;
 import java.awt.geom.Path2D;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -116,6 +120,8 @@ final class CubeField extends JComponent {
         boolean selected;        // one of the two about to be joined
         double fill;             // how full the cube is shown (0 to 1), gliding to...
         double fillTo;           // ...how full it should be
+        BufferedImage shown;     // the picture it was last drawn from, and...
+        int shownSize;           // ...how big that was
 
         Cube(int symbol) {
             this.symbol = symbol;
@@ -1361,6 +1367,12 @@ final class CubeField extends JComponent {
     @Override
     protected void paintComponent(Graphics g) {
         layoutIfNeeded();
+        made = 0;
+        still = zoom == seenZoom && zoomY == seenZoomY && panX == seenPanX && panY == seenPanY;
+        seenZoom = zoom;
+        seenZoomY = zoomY;
+        seenPanX = panX;
+        seenPanY = panY;
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
@@ -1496,16 +1508,85 @@ final class CubeField extends JComponent {
         }
     }
 
+    private static final int PAD = 2;           // room around a cube's picture for its outline
+    private static final int PER_FRAME = 16;    // how many new pictures a frame may make
+    private int made;
+    private static final int FLASH_STEPS = 12;   // a cube's flash is drawn in this many steps: the picture of each is made once
+    private static final long PICTURE_BYTES = 2L << 20;   // all the cube pictures together may take this much memory
+    private final Map<Long, BufferedImage> pictures = new LinkedHashMap<>(256, 0.75f, true);   // least recently used first
+    private static final int PICTURE_COST = 768;   // what the image itself takes besides its pixels
+    private long pictureBytes;
+    private boolean still;   // the camera has not moved since the last frame: the cubes can be copied from pictures
+    private double seenZoom, seenZoomY, seenPanX, seenPanY;
+
+    private BufferedImage lineLayer;   // the lines below, drawn once and kept for as long as nothing they depend on moves
+    private long lineLook;
+
     /** The lines from each joining node to the two under it, with the 0 or 1 each stands for. */
     private void paintLines(Graphics2D g2) {
-        g2.setStroke(new BasicStroke((float) Math.max(1.2, Math.min(3, NODE * zoom * 0.06)), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        int w = getWidth();
+        int h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        long look = Math.round(zoom * 1024) * 31 + Math.round(zoomY * 1024);
+        for (Cube p : cubes) {   // everything a line is drawn from, to an eighth of a pixel: a cube easing into place stops counting as moving long before it stops
+            look = look * 31 + Math.round((panX + p.x * zoom) * 8);
+            look = look * 31 + Math.round((panY + p.y * zoomY) * 8);
+            look = look * 31 + Math.round(p.size * zoom * 8);
+            look = look * 31 + Math.round(Math.min(1, p.age / GROW) * 256);
+            look = look * 31 + Math.round(Math.min(1, p.age / 0.9) * 256);
+        }
+        if (lineLayer == null || lineLayer.getWidth() != w || lineLayer.getHeight() != h) {
+            lineLayer = getGraphicsConfiguration() == null ? new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
+                : getGraphicsConfiguration().createCompatibleImage(w, h, Transparency.TRANSLUCENT);   // the kind the screen uses, so drawing it needs no conversion
+        } else if (look == lineLook) {
+            g2.drawImage(lineLayer, 0, 0, null);
+            return;
+        }
+        lineLook = look;
+        Graphics2D lg = lineLayer.createGraphics();
+        lg.setComposite(AlphaComposite.Clear);
+        lg.fillRect(0, 0, w, h);
+        lg.setComposite(AlphaComposite.SrcOver);
+        lg.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        lg.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        lg.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);   // a line moves by fractions of a pixel, not in steps
+        drawLines(lg);
+        lg.dispose();
+        g2.drawImage(lineLayer, 0, 0, null);
+    }
+
+    /** Every glow in one stroke, then every line of one color in one stroke: a drawing call for each line is what was slow. */
+    private void drawLines(Graphics2D g2) {
+        float width = (float) Math.max(1.2, Math.min(3, NODE * zoom * 0.06));
+        Path2D.Double glow = new Path2D.Double();
+        Map<Color, Path2D.Double> mains = new LinkedHashMap<>();
+        List<double[]> bits = new ArrayList<>();
         for (Cube p : cubes) {
             if (p.left != null && !Double.isNaN(p.x)) {
-                line(g2, p, p.left, "0");
-                line(g2, p, p.right, "1");
+                line(glow, mains, bits, p, p.left, 0);
+                line(glow, mains, bits, p, p.right, 1);
             }
         }
-        g2.setStroke(new BasicStroke(1f));
+        g2.setStroke(new BasicStroke(width * 3.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));   // a soft glow under the lines
+        g2.setColor(fade(Theme.ACCENT, 0.1));
+        g2.draw(glow);
+        g2.setStroke(new BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        for (Map.Entry<Color, Path2D.Double> e : mains.entrySet()) {
+            g2.setColor(e.getKey());
+            g2.draw(e.getValue());
+        }
+        for (double[] b : bits) {   // {middle, row, radius, 0 or 1}
+            double r = b[2];
+            g2.setColor(Theme.CHROME_BG);
+            g2.fill(new Ellipse2D.Double(b[0] - r, b[1] - r, 2 * r, 2 * r));
+            g2.setFont(BIT.deriveFont((float) Math.round(r * 1.3)));   // whole sizes: every fraction in between would be cached for good
+            g2.setColor(Theme.VIOLET);
+            String bit = b[3] == 0 ? "0" : "1";
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(bit, (float) (b[0] - fm.stringWidth(bit) / 2.0), (float) (b[1] + (fm.getAscent() - fm.getDescent()) / 2.0));
+        }
     }
 
     /** The corners of the line from {@code p} down to {@code c}: out of the middle of the parent's front (a little left of its middle), across, into the child's top. */
@@ -1525,7 +1606,7 @@ final class CubeField extends JComponent {
      * the drop to a child is in the child's own column, which has nothing else in it (the nodes
      * above a child are only its ancestors), so a line can never cross another line or a cube.
      */
-    private void line(Graphics2D g2, Cube p, Cube c, String bit) {
+    private void line(Path2D.Double glow, Map<Color, Path2D.Double> mains, List<double[]> bits, Cube p, Cube c, int bit) {
         double grow = Math.min(1, p.age / GROW);
         if (grow <= 0) {
             return;
@@ -1539,31 +1620,22 @@ final class CubeField extends JComponent {
         double y1 = ys[0];
         double yb = ys[1];
         double y2 = ys[3];
-        Color main = Theme.mix(Theme.ACCENT, Theme.TEXT_MUTED, Math.min(1, p.age / 0.9));
-        Stroke thin = g2.getStroke();
-        Stroke wide = new BasicStroke(((BasicStroke) thin).getLineWidth() * 3.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);   // a soft glow under the line
+        Path2D.Double main = mains.computeIfAbsent(Theme.mix(Theme.ACCENT, Theme.TEXT_MUTED, Math.min(1, p.age / 0.9)), k -> new Path2D.Double());
         double left = grow * (Math.abs(yb - y1) + Math.abs(x2 - x1) + Math.abs(y2 - yb));   // how much of the line is drawn so far
+        glow.moveTo(xs[0], ys[0]);
+        main.moveTo(xs[0], ys[0]);
         for (int i = 0; i < 3 && left > 0; i++) {
             double len = Math.abs(xs[i + 1] - xs[i]) + Math.abs(ys[i + 1] - ys[i]);
             double f = len == 0 ? 1 : Math.min(1, left / len);
-            Line2D.Double part = new Line2D.Double(xs[i], ys[i], xs[i] + (xs[i + 1] - xs[i]) * f, ys[i] + (ys[i + 1] - ys[i]) * f);
-            g2.setStroke(wide);
-            g2.setColor(fade(Theme.ACCENT, 0.1));
-            g2.draw(part);
-            g2.setStroke(thin);
-            g2.setColor(main);
-            g2.draw(part);
+            double x = xs[i] + (xs[i + 1] - xs[i]) * f;
+            double y = ys[i] + (ys[i + 1] - ys[i]) * f;
+            glow.lineTo(x, y);
+            main.lineTo(x, y);
             left -= len;
         }
         double r = Math.max(7, Math.min(15, ps * 0.17));   // the 0 or 1 sits on the way across, if there is room for it
         if (grow >= 1 && Math.abs(x2 - x1) >= 2 * r + 6) {
-            double mx = (x1 + x2) / 2;
-            g2.setColor(Theme.CHROME_BG);
-            g2.fill(new Ellipse2D.Double(mx - r, yb - r, 2 * r, 2 * r));
-            g2.setFont(BIT.deriveFont((float) (r * 1.3)));
-            g2.setColor(Theme.VIOLET);
-            FontMetrics fm = g2.getFontMetrics();
-            g2.drawString(bit, (float) (mx - fm.stringWidth(bit) / 2.0), (float) (yb + (fm.getAscent() - fm.getDescent()) / 2.0));
+            bits.add(new double[] {(x1 + x2) / 2, yb, r, bit});
         }
     }
 
@@ -1589,39 +1661,119 @@ final class CubeField extends JComponent {
         if (Double.isNaN(c.x)) {
             return;
         }
-        double pop = c.age >= POP ? 1 : easeOutBack(c.age / POP);
+        double pop = c.age >= POP ? 1 : Math.round(easeOutBack(c.age / POP) * 32) / 32.0;   // in steps: text drawn at every possible scale would be cached for good
         if (pop < 0.02) {
             return;
         }
         int s = Math.max(1, (int) Math.round(c.size * zoom));
+        int st = Math.max(1, (int) Math.round(c.tsize * zoom));   // the size it is headed for: its picture is made at that, and stretched while it gets there
+        Graphics2D g2 = (Graphics2D) g.create();
+        if (still && c.fill == c.fillTo && s <= 2 * st && 2 * s >= st) {
+            // While the camera stands still a cube is not drawn from scratch each frame: a picture of it is made once and copied from then on.
+            // Only the count changes all the time, so that is drawn on top.
+            // A whole cube flashes by its top turning bright and an outline lighting up: that is drawn over its picture, so
+            // the picture is the same at every flash. A small cube has no text, so one byte's picture does for all of them.
+            boolean whole = st >= CUBE;
+            int flash = whole ? 0 : (int) Math.round(c.flash * FLASH_STEPS);
+            int fill = (int) Math.round(c.fill * 64);
+            int look = c.symbol < 0 ? 0 : st <= 13 ? 1 : c.symbol + 2;
+            long key = ((long) look << 40) | ((long) st << 24) | ((long) flash << 16) | ((long) fill << 8) | (!whole && c.selected ? 1 : 0);
+            BufferedImage picture = pictures.get(key);
+            int shownAs = st;
+            if (picture == null && made >= PER_FRAME && c.shown != null && c.shownSize <= 2 * s && 2 * c.shownSize >= s) {
+                picture = c.shown;   // a new picture of every cube at once would be a long frame: for now the last one is stretched
+                shownAs = c.shownSize;
+            }
+            if (picture == null) {
+                made++;
+                int dim = st + st / 12 + 9;   // the cube, its shadow and the outline
+                picture = new BufferedImage(dim, dim, BufferedImage.TYPE_INT_ARGB);
+                Graphics2D pg = picture.createGraphics();
+                pg.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                pg.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                pg.translate(PAD, PAD);
+                drawCube(pg, c, st, flash / (double) FLASH_STEPS, fill / 64.0, false);   // (a whole cube: no flash)
+                pg.dispose();
+                pictures.put(key, picture);
+                pictureBytes += PICTURE_COST + 4L * dim * dim;
+                for (Iterator<BufferedImage> old = pictures.values().iterator(); pictureBytes > PICTURE_BYTES && old.hasNext(); ) {
+                    BufferedImage unused = old.next();
+                    if (unused != picture) {   // the pictures nobody has asked for lately go first
+                        pictureBytes -= PICTURE_COST + 4L * unused.getWidth() * unused.getHeight();
+                        old.remove();
+                    }
+                }
+            }
+            c.shown = picture;
+            c.shownSize = shownAs;
+            double cx = panX + c.x * zoom;
+            double cy = panY + c.y * zoomY;
+            if (pop == 1 && s == shownAs && c.x == c.tx && c.y == c.ty) {
+                g2.translate(Math.round(cx - s / 2.0), Math.round(cy - s / 2.0));   // at rest: on whole pixels, so it is as sharp as can be
+            } else {
+                g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                g2.translate(cx, cy);
+                g2.scale(pop * s / shownAs, pop * s / shownAs);
+                g2.translate(-shownAs / 2.0, -shownAs / 2.0);
+            }
+            g2.drawImage(picture, -PAD, -PAD, null);
+            if (shownAs >= CUBE && c.flash > 0.02) {
+                float f = (float) Math.min(1, c.flash);
+                int[] cut = shape(shownAs, c.symbol < 0);
+                int d = cut[0];
+                int w = cut[1];
+                g2.setColor(Theme.CARET);
+                g2.setComposite(AlphaComposite.SrcOver.derive(f));
+                g2.fillPolygon(new int[] {0, d, shownAs, w}, new int[] {d, 0, 0, d}, 4);
+                g2.setComposite(AlphaComposite.SrcOver.derive(0.9f * f));
+                g2.setStroke(new BasicStroke(c.selected ? 3f : 2f));
+                g2.drawPolygon(new int[] {0, d, shownAs, shownAs, w, 0}, new int[] {d, 0, 0, w, shownAs, shownAs}, 6);
+            }
+            drawCounts(g2, c, shownAs);
+        } else {
+            g2.translate(panX + c.x * zoom, panY + c.y * zoomY);
+            g2.scale(pop, pop);
+            g2.translate(-s / 2.0, -s / 2.0);
+            drawCube(g2, c, s, c.flash, c.fill, true);
+        }
+        g2.dispose();
+    }
+
+    /** How a cube is cut up: {how far the top and side reach, the front's width and height, the count's strip, the rest of the front}. */
+    private static int[] shape(int s, boolean joined) {
+        int d = (int) Math.round(Math.max(3, s * 14 / 100) * ramp(s, FLAT, CUBE));
+        int w = s - d;
+        int plate = joined ? 0 : (int) Math.round((s < 24 ? 8 : Math.max(11, w * 40 / 100)) * ramp(s, 16, 22));
+        return new int[] {d, w, plate, w - plate};
+    }
+
+    /** The cube with its top left corner at the origin; {@code counts} says whether the numbers are drawn too. */
+    private void drawCube(Graphics2D g2, Cube c, int s, double flash, double fill, boolean counts) {
         boolean joined = c.symbol < 0;
         double depth = ramp(s, FLAT, CUBE);   // 0: a flat square, 1: a whole cube
         double text = ramp(s, 13, 19);
-        Graphics2D g2 = (Graphics2D) g.create();
-        g2.translate(panX + c.x * zoom, panY + c.y * zoomY);
-        g2.scale(pop, pop);
-        g2.translate(-s / 2.0, -s / 2.0);
         if (s >= 13) {
             fonts(s);
         }
-        int d = (int) Math.round(Math.max(3, s * 14 / 100) * depth);   // how far the top and side reach
-        int w = s - d;                       // the front is w by w
-        int plate = joined ? 0 : (int) Math.round((s < 24 ? 8 : Math.max(11, w * 40 / 100)) * ramp(s, 16, 22));   // the strip along the bottom that holds the count
-        int body = w - plate;                // the rest of the front
+        int[] cut = shape(s, joined);
+        int d = cut[0];                      // how far the top and side reach
+        int w = cut[1];                      // the front is w by w
+        int plate = cut[2];                  // the strip along the bottom that holds the count
+        int body = cut[3];                   // the rest of the front
 
         int shadow = Math.max(2, d / 2);
         g2.setColor(fade(Color.BLACK, 0.27 * depth));   // shadow on the stage
         g2.fillRect(shadow, d + shadow + 1, s, w);
 
         // Flat, the whole square is the color of a cube's top, so that it shows up; it darkens into the front.
-        g2.setColor(Theme.mix(Theme.mix(joined ? JOINED_TOP : TOP_LOW, joined ? JOINED_FRONT : FRONT, depth), Theme.CARET, c.flash * (1 - depth)));
+        g2.setColor(Theme.mix(Theme.mix(joined ? JOINED_TOP : TOP_LOW, joined ? JOINED_FRONT : FRONT, depth), Theme.CARET, flash * (1 - depth)));
         g2.fillRect(0, d, w, w);
         if (plate > 0) {
             g2.setColor(PLATE);
             g2.fillRect(1, d + body, w - 1, plate - 1);
         }
-        if (c.fill > 0.004 && !joined) {   // what the beam has delivered, rising from the bottom of the front
-            int level = Math.max(1, (int) Math.round(w * c.fill));
+        if (fill > 0.004 && !joined) {   // what the beam has delivered, rising from the bottom of the front
+            int level = Math.max(1, (int) Math.round(w * fill));
             g2.setColor(fade(Theme.ACCENT, 0.5));
             g2.fillRect(0, d + w - level, w, level);
             g2.setColor(fade(Theme.ACCENT_HOVER, 0.9));
@@ -1631,7 +1783,7 @@ final class CubeField extends JComponent {
         Polygon top = new Polygon(new int[] {0, d, s, w}, new int[] {d, 0, 0, d}, 4);
         Polygon side = new Polygon(new int[] {w, s, s, w}, new int[] {d, 0, w, s}, 4);
         if (d > 0) {
-            g2.setColor(Theme.mix(joined ? JOINED_TOP : TOP_LOW, Theme.CARET, c.flash));
+            g2.setColor(Theme.mix(joined ? JOINED_TOP : TOP_LOW, Theme.CARET, flash));
             g2.fillPolygon(top);
             g2.setColor(joined ? JOINED_SIDE : SIDE_LOW);
             g2.fillPolygon(side);
@@ -1646,20 +1798,20 @@ final class CubeField extends JComponent {
             g2.drawPolygon(top);
             g2.drawPolygon(side);
         }
-        if (c.flash > 0.02 && d > 0) {
-            g2.setColor(fade(Theme.CARET, 0.9 * c.flash * depth));
+        if (flash > 0.02 && d > 0) {
+            g2.setColor(fade(Theme.CARET, 0.9 * flash * depth));
             g2.setStroke(new BasicStroke(c.selected ? 3f : 2f));
             g2.drawPolygon(new int[] {0, d, s, s, w, 0}, new int[] {d, 0, 0, w, s, s}, 6);
         }
 
         if (text <= 0) {
-            g2.dispose();
             return;
         }
         g2.setComposite(AlphaComposite.SrcOver.derive((float) text));
         if (joined) {
-            drawCount(g2, c.count, w, d, w, num);
-            g2.dispose();
+            if (counts) {
+                drawCount(g2, c.count, w, d, w, num);
+            }
             return;
         }
         String label = label(c.symbol);
@@ -1669,11 +1821,28 @@ final class CubeField extends JComponent {
             g2.setColor(isSpecial(c.symbol) ? Theme.VIOLET : Theme.TEXT_PRIMARY);
             g2.drawString(label, (w - fm.stringWidth(label)) / 2, d + body / 2 + (fm.getAscent() - fm.getDescent()) / 2);
         }
-        if (plate >= 6) {
+        if (counts && plate >= 6) {
             g2.setComposite(AlphaComposite.SrcOver.derive((float) Math.min(text, ramp(plate, 5, 8))));
             drawCount(g2, c.count, w, d + body, plate, tiny);
         }
-        g2.dispose();
+    }
+
+    /** Just the number on a cube that is copied from its picture, drawn with the cube's top left corner at the origin. */
+    private void drawCounts(Graphics2D g2, Cube c, int s) {
+        double text = ramp(s, 13, 19);
+        if (text <= 0) {
+            return;
+        }
+        fonts(s);
+        boolean joined = c.symbol < 0;
+        int[] cut = shape(s, joined);
+        if (joined) {
+            g2.setComposite(AlphaComposite.SrcOver.derive((float) text));
+            drawCount(g2, c.count, cut[1], cut[0], cut[1], num);
+        } else if (cut[2] >= 6) {
+            g2.setComposite(AlphaComposite.SrcOver.derive((float) Math.min(text, ramp(cut[2], 5, 8))));
+            drawCount(g2, c.count, cut[1], cut[0] + cut[3], cut[2], tiny);
+        }
     }
 
     /** 0 up to {@code from}, 1 from {@code to}, and a smooth ease between. */

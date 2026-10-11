@@ -1,8 +1,10 @@
 package hcs.gui.process;
 
 import hcs.gui.Theme;
+import java.awt.AlphaComposite;
 import java.awt.BasicStroke;
 import java.awt.Color;
+import java.awt.Composite;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
@@ -16,6 +18,7 @@ import java.awt.font.FontRenderContext;
 import java.awt.geom.AffineTransform;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Line2D;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -257,6 +260,7 @@ final class StageLayer extends LayerUI<JPanel> {
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         for (Spirit s : flying) {
             draw(g2, s);
         }
@@ -313,7 +317,7 @@ final class StageLayer extends LayerUI<JPanel> {
         double a = Math.max(0, b.age);
         double fade = Math.min(1, b.life * 5);   // the mote's own fade in, which is also how the digit turns into it
         if (fade < 1) {   // the digit and the glow it leaves
-            double size = 1 - 0.6 * fade;
+            double size = Math.round((1 - 0.6 * fade) * 32) / 32.0;   // in steps: text drawn at every possible scale would be cached for good
             double alpha = Math.min(1, 0.3 + 8 * a / HOP) * (1 - fade);
             for (int k = 2; k >= 0; k--) {
                 if (a - 0.025 * k < 0) {
@@ -423,10 +427,23 @@ final class StageLayer extends LayerUI<JPanel> {
         }
     }
 
+    private static final int GLOW = 128;
+    private static BufferedImage glowImage;   // one glow, drawn once and stretched to each one's size: a gradient fill for every spirit and every step of its trail was slow
+
     private static void glow(Graphics2D g, double x, double y, double radius, double alpha) {
-        g.setPaint(new RadialGradientPaint((float) x, (float) y, (float) radius, new float[] {0f, 0.45f, 1f},
-            new Color[] {rgba(Theme.VIOLET, 170 * alpha), rgba(Theme.ACCENT, 70 * alpha), rgba(Theme.ACCENT, 0)}));
-        g.fill(new Ellipse2D.Double(x - radius, y - radius, 2 * radius, 2 * radius));
+        if (glowImage == null) {
+            glowImage = new BufferedImage(GLOW, GLOW, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D p = glowImage.createGraphics();
+            p.setPaint(new RadialGradientPaint(GLOW / 2f, GLOW / 2f, GLOW / 2f, new float[] {0f, 0.45f, 1f},
+                new Color[] {rgba(Theme.VIOLET, 170), rgba(Theme.ACCENT, 70), rgba(Theme.ACCENT, 0)}));
+            p.fillRect(0, 0, GLOW, GLOW);
+            p.dispose();
+        }
+        Composite was = g.getComposite();
+        g.setComposite(AlphaComposite.SrcOver.derive((float) Math.max(0, Math.min(1, alpha))));
+        double k = 2 * radius / GLOW;
+        g.drawImage(glowImage, new AffineTransform(k, 0, 0, k, x - radius, y - radius), null);
+        g.setComposite(was);
     }
 
     private static void body(Graphics2D g, int symbol, double x, double y, double size, double alpha) {

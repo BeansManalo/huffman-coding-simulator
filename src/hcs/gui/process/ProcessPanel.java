@@ -26,6 +26,7 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.AffineTransform;
+import java.awt.geom.Area;
 import java.util.Arrays;
 import java.util.concurrent.ExecutionException;
 import javax.swing.Box;
@@ -35,6 +36,7 @@ import javax.swing.JLayer;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
+import javax.swing.RepaintManager;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
@@ -105,6 +107,7 @@ public final class ProcessPanel extends JPanel {
     private static final double CLONE_MIN_MS = 3000;   // the clones take at least this long to leave the table, so that a few digits are taken in one by one
     private static final double READY_MS = 600;     // charged, before it fires
     private static final double CLOSE_MS = 700;     // the cannon sweeps out, the tree has its room back
+    private static final double SKIP_OUT_MS = 350;  // SKIP fades out alone; only then do BACK and the zoom control arrive
     private static final int CANNON_W = 340;
     private static final int STAT_HEIGHT = 64;
     private static final int STAT_SPACE = 10;
@@ -144,6 +147,27 @@ public final class ProcessPanel extends JPanel {
     private JLayer<JPanel> cannon;         // ...and the cannon's box, over the root
     private final int boxHeight;
     private int slotHeight;
+    static {
+        RepaintManager.setCurrentManager(new OneRepaint());
+    }
+
+    /**
+     * Each part of the show asks for its own repaint every frame, and Swing paints each of those on its own, so
+     * the stage was drawn three or four times a frame. This turns all of a panel's requests into one.
+     */
+    private static final class OneRepaint extends RepaintManager {
+        @Override
+        public void addDirtyRegion(JComponent c, int x, int y, int w, int h) {
+            Component panel = c instanceof ProcessPanel ? c : SwingUtilities.getAncestorOfClass(ProcessPanel.class, c);
+            if (panel == null || !c.isShowing()) {
+                super.addDirtyRegion(c, x, y, w, h);
+                return;
+            }
+            Rectangle r = SwingUtilities.convertRectangle(c, new Rectangle(x, y, w, h), panel);
+            super.addDirtyRegion((JComponent) panel, r.x, r.y, r.width, r.height);
+        }
+    }
+
     private final Timer timer = new Timer(15, e -> tick());
     private Phase phase = Phase.WAIT;
     private boolean ready;
@@ -325,10 +349,23 @@ public final class ProcessPanel extends JPanel {
 
     @Override
     protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
-        Theme.backdrop(g, this);
+        Graphics2D g2 = (Graphics2D) g.create();
+        if (stage != null) {
+            // The stage paints its own background over all of its area, so only what is around it needs this one.
+            Rectangle dirty = g.getClipBounds() != null ? g.getClipBounds() : new Rectangle(0, 0, getWidth(), getHeight());
+            Area around = new Area(dirty);
+            around.subtract(new Area(stage.getBounds()));
+            if (around.isEmpty()) {
+                g2.dispose();
+                return;
+            }
+            g2.clip(around);
+        }
+        super.paintComponent(g2);
+        Theme.backdrop(g2, this);
         Point moved = cubes.dotShift();
-        Theme.dots(g, this, moved.x, moved.y);   // the whole background is dotted, not just behind the cubes
+        Theme.dots(g2, this, moved.x, moved.y);   // the whole background is dotted, not just behind the cubes
+        g2.dispose();
     }
 
     // -- The table -----------------------------------------------------
@@ -787,19 +824,21 @@ public final class ProcessPanel extends JPanel {
                 placeCannon();
                 if (ms >= CLOSE_MS) {
                     cannon.setVisible(false);
-                    showBack(true);
                     showSkip(false);   // the show is over: SKIP is on its way out and cannot be pressed
                     next(Phase.ZOOM);
                 }
             }
-            case ZOOM -> {
-                zoomReveal.progress = easeOut(ms / STAT_MS);
+            case ZOOM -> {   // SKIP leaves first, then BACK and the zoom control arrive in its place
+                skipReveal.progress = 1 - Math.min(1, ms / SKIP_OUT_MS);   // steadily, so that its light does not linger at the end
+                zoomReveal.progress = easeOut((ms - SKIP_OUT_MS) / STAT_MS);
                 backReveal.progress = zoomReveal.progress;
-                skipReveal.progress = 1 - zoomReveal.progress;
+                if (ms >= SKIP_OUT_MS && !btnBack.isEnabled()) {
+                    showBack(true);   // it covers SKIP, so it takes the mouse only once SKIP has gone
+                }
                 zoomBox.repaint();
                 backBox.repaint();
                 skipBox.repaint();
-                if (ms >= STAT_MS) {
+                if (ms >= SKIP_OUT_MS + STAT_MS) {
                     next(Phase.DONE);
                 }
             }
